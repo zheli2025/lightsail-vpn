@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.yaml
+*.yml
+state.json
+*.log
+.aws/
+.sub-*
+backups/
