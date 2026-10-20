@@ -31,6 +31,22 @@ REQUIRED=(
 UNITS=('hysteria-server.service','geo-update.service','geo-update.timer',
        'traffic-update.service','traffic-update.timer','domain-usage.service',
        'domain-usage-prune.service','domain-usage.timer')
+CORE_REQUIRED=('/etc/hysteria/config.yaml','/etc/systemd/system/hysteria-server.service')
+COMPONENTS={
+    '订阅管理': (('/usr/local/bin/sub','/etc/hysteria/.sub-state','/etc/hysteria/.sub-node',
+                  '/etc/hysteria/.sub-token','/etc/nginx/sites-available/vpn-subscription'),
+                 ('/usr/local/bin/sub',),()),
+    'Geo 缓存': (('/usr/local/bin/geo-update',),('/usr/local/bin/geo-update',),
+                 ('geo-update.service','geo-update.timer')),
+    '域名统计': (('/usr/local/bin/domain-usage','/etc/hysteria/.traffic-stats-secret',
+                  '/etc/systemd/system/domain-usage.service'),('/usr/local/bin/domain-usage',),
+                 ('domain-usage.service','domain-usage-prune.service','domain-usage.timer')),
+    'AWS 套餐统计': (('/usr/local/bin/traffic-update',
+                     '/etc/systemd/system/traffic-update.service.d/migrate.conf',
+                     '/etc/systemd/system/traffic-update.service'),
+                    ('/usr/local/lib/lightsail-vpn/traffic-update.py','/usr/local/bin/traffic-update'),
+                    ('traffic-update.service','traffic-update.timer')),
+}
 
 
 def digest(data): return hashlib.sha256(data).hexdigest()
@@ -39,6 +55,7 @@ def digest(data): return hashlib.sha256(data).hexdigest()
 class Updater:
     def __init__(self,root=Path('/'),repo=REPO,runner=None):
         self.root=Path(root); self.repo=Path(repo); self.runner=runner or self.run
+        self.notices=[]; self.blocked=[]
 
     def path(self,absolute): return self.root/absolute.lstrip('/')
 
@@ -66,20 +83,35 @@ class Updater:
         if registry.exists(): hashes.update(json.loads(registry.read_text()).values())
         return hashes
 
-    def plan(self,units=False):
-        missing=[p for p in REQUIRED if not self.path(p).is_file()]
-        missing += [f'/etc/systemd/system/{u}' for u in UNITS if not self.path('/etc/systemd/system/'+u).is_file()]
-        missing += [p for p in ('/usr/local/bin/sub','/usr/local/bin/geo-update',
-                              '/usr/local/bin/domain-usage','/usr/local/bin/traffic-update') if not self.path(p).is_file()]
-        if missing: raise ValueError('不是完整的原项目安装，缺少：'+', '.join(missing))
-        # 只读地区/实例元数据，不访问 AWS 凭据、密码、订阅内容或数据库。
-        import runpy
-        settings=runpy.run_path(str(self.repo/'scripts/traffic-launcher.py'))['settings']
-        try: settings(self.path('/etc/systemd/system/traffic-update.service.d/migrate.conf'))
-        except (ValueError,OSError): raise ValueError('流量统计需有效的 LS_REGION 和 LS_INSTANCE_NAME；请先按 README 配置非敏感实例参数') from None
-        known=self.known(); targets=dict(FILES)
+    def targets(self,units=False):
+        self.notices=[]
+        missing=[p for p in CORE_REQUIRED if not self.path(p).is_file()]
+        if missing: raise ValueError('未发现预期的 Hysteria 基础安装，缺少：'+', '.join(missing))
+        result={}
         if units:
-            targets.update({f'/etc/systemd/system/{u}':('systemd/'+u,0o644) for u in UNITS})
+            result['/etc/systemd/system/hysteria-server.service']=('systemd/hysteria-server.service',0o644)
+        for name,(required,programs,unit_names) in COMPONENTS.items():
+            missing=[p for p in required if not self.path(p).is_file()]
+            if missing:
+                self.notices.append(f'{name}：未安装或布局不兼容，跳过并保留现场；缺少 '+', '.join(missing))
+                continue
+            if name=='AWS 套餐统计':
+                import runpy
+                settings=runpy.run_path(str(self.repo/'scripts/traffic-launcher.py'))['settings']
+                try: settings(self.path('/etc/systemd/system/traffic-update.service.d/migrate.conf'))
+                except (ValueError,OSError):
+                    self.notices.append('AWS 套餐统计：实例参数不完整，跳过；需先配置 LS_REGION/LS_INSTANCE_NAME')
+                    continue
+            result.update({p:FILES[p] for p in programs})
+            if units:
+                for unit in unit_names:
+                    path='/etc/systemd/system/'+unit
+                    if self.path(path).is_file(): result[path]=('systemd/'+unit,0o644)
+                    else: self.notices.append(f'{path} 不存在，不自动创建或启用')
+        return result
+
+    def plan(self,units=False,tolerate_unknown=False):
+        known=self.known(); targets=self.targets(units); self.blocked=[]
         changes=[]
         for target,(source,mode) in targets.items():
             path=self.path(target); data=(self.repo/source).read_bytes()
@@ -87,7 +119,9 @@ class Updater:
             before=path.read_bytes() if path.exists() else None
             if before==data: continue
             if before is not None and digest(before) not in known:
-                raise ValueError(f'{target} 有未识别的本地改动；保留现场，请先审查差异')
+                message=f'{target} 是未收录的旧版本或有本地改动；不会覆盖，需先核对源码'
+                if not tolerate_unknown: raise ValueError(message)
+                self.blocked.append(message); continue
             changes.append((target,data,mode))
         return changes
 
@@ -103,19 +137,20 @@ class Updater:
         finally: Path(tmp).unlink(missing_ok=True)
 
     def save_registry(self):
-        values={target:digest(self.path(target).read_bytes()) for target in FILES if self.path(target).exists()}
+        values={}
         known=self.known()
-        for unit in UNITS:
-            target='/etc/systemd/system/'+unit
+        for target,(source,_) in self.targets(units=True).items():
+            if not self.path(target).is_file(): continue
             data=self.path(target).read_bytes(); checksum=digest(data)
             # 没有更新的自定义单元不能被登记成“受管理”，否则下次会误覆盖。
-            if checksum in known or data==(self.repo/'systemd'/unit).read_bytes():
+            if checksum in known or data==(self.repo/source).read_bytes():
                 values[target]=checksum
         self.atomic(self.path('/var/lib/lightsail-vpn-updater/installed.json'),json.dumps(values).encode(),0o600)
 
     def apply(self,units=False):
         changes=self.plan(units)
-        if not changes: print('已经是当前仓库版本，无需更新'); return None
+        for note in self.notices: print('提示：'+note)
+        if not changes: print('已识别组件无需更新；跳过的缺失/不兼容组件没有安装或迁移'); return None
         for service in ('traffic-update.service','geo-update.service','domain-usage-prune.service'):
             if self.active(service): raise ValueError(f'{service} 正在运行，请等它完成后重试')
         stamp=datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')+'-'+secrets.token_hex(4)
@@ -189,7 +224,7 @@ class Updater:
 
 
 def main():
-    p=argparse.ArgumentParser(description='原项目完整旧安装的增量更新；默认仅检查，不读取/重建秘密配置')
+    p=argparse.ArgumentParser(description='按组件识别旧安装并增量更新；默认仅检查，不读取/重建秘密配置')
     action=p.add_mutually_exclusive_group()
     action.add_argument('--check',action='store_true',help='只读检查，默认行为')
     action.add_argument('--apply',action='store_true',help='备份并更新程序，不重装 Hysteria/Nginx')
@@ -199,9 +234,12 @@ def main():
     if os.geteuid()!=0: raise ValueError('请用 sudo bash update.sh 运行')
     updater=Updater()
     if not a.apply and not a.rollback:
-        changes=updater.plan(a.update_units)
-        print('兼容检查通过；计划更新：' if changes else '兼容检查通过；程序已是当前版本')
+        changes=updater.plan(a.update_units,tolerate_unknown=True)
+        for note in updater.notices: print('提示：'+note)
+        for note in updater.blocked: print('待确认：'+note)
+        print('基础服务已识别；可更新项目：' if changes else '基础服务已识别；当前没有可自动更新的代码')
         for path,_,_ in changes: print('  '+path)
+        if updater.blocked: print('存在未识别代码，--apply 会停止；请先核对，不能视为完整兼容通过。')
         print('原配置、订阅、密钥、Geo 缓存、SQLite 和 AWS 凭据均不变。')
         return
     lock=Path('/run/lightsail-vpn-deploy.lock')

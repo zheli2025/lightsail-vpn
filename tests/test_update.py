@@ -94,9 +94,49 @@ class TestUpdate(unittest.TestCase):
         self.assertEqual(path.read_bytes(),b'custom daily schedule')
         with self.assertRaises(ValueError): self.update.plan(units=True)
 
-    def test_incomplete_install_rejected(self):
+    def test_missing_subscription_state_skips_subscription(self):
         (self.root/'etc/hysteria/.sub-state').unlink()
+        (self.root/'usr/local/bin/sub').write_bytes(b'legacy subscription implementation')
+        changes=self.update.plan()
+        self.assertNotIn('/usr/local/bin/sub',[p for p,_,_ in changes])
+        self.assertTrue(any('订阅管理' in text for text in self.update.notices))
+
+    def test_missing_core_install_rejected(self):
+        (self.root/'etc/hysteria/config.yaml').unlink()
         with self.assertRaises(ValueError): self.update.plan()
+
+    def test_reported_early_install_is_detected_without_private_reads(self):
+        # 与用户报告完全相同的缺失清单：基础代理/旧 sub/Geo 已有，扩展未安装。
+        missing=[p for p in mod.REQUIRED if p!='/etc/hysteria/config.yaml']
+        missing += ['/etc/systemd/system/'+u for u in mod.UNITS if u.startswith(('traffic-','domain-'))]
+        missing += ['/usr/local/bin/domain-usage','/usr/local/bin/traffic-update']
+        for path in missing: self.update.path(path).unlink(missing_ok=True)
+        old_sub=self.root/'usr/local/bin/sub'; old_sub.write_bytes(b'older custom sub, do not overwrite')
+        before={p:p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        changes=self.update.plan()
+        self.assertEqual(changes,[])
+        self.assertTrue(any('域名统计' in message for message in self.update.notices))
+        self.assertTrue(any('AWS 套餐统计' in message for message in self.update.notices))
+        with contextlib.redirect_stdout(io.StringIO()): self.update.apply()
+        self.assertEqual(before,{p:p.read_bytes() for p in before})
+        self.assertFalse((self.root/'var/backups/lightsail-vpn-update').exists())
+
+    def test_partial_update_registry_ignores_missing_units_and_unknown_sub(self):
+        (self.root/'etc/hysteria/.sub-state').unlink()
+        (self.root/'etc/systemd/system/domain-usage.timer').unlink()
+        sub=self.root/'usr/local/bin/sub'; sub.write_bytes(b'unknown legacy sub')
+        with contextlib.redirect_stdout(io.StringIO()): stamp=self.update.apply()
+        registry=json.loads((self.root/'var/lib/lightsail-vpn-updater/installed.json').read_text())
+        self.assertNotIn('/usr/local/bin/sub',registry)
+        self.assertEqual(sub.read_bytes(),b'unknown legacy sub')
+        with contextlib.redirect_stdout(io.StringIO()): self.update.rollback(stamp)
+
+    def test_unknown_version_is_reported_by_readonly_check(self):
+        path=self.root/'usr/local/bin/geo-update'; path.write_bytes(b'unknown old geo')
+        changes=self.update.plan(tolerate_unknown=True)
+        self.assertTrue(any('/usr/local/bin/geo-update' in item for item in self.update.blocked))
+        self.assertNotIn('/usr/local/bin/geo-update',[p for p,_,_ in changes])
+        with self.assertRaises(ValueError): self.update.apply()
 
     def test_explicit_unit_update_and_rollback(self):
         repo=self.root/'new-repo'; repo.mkdir()
