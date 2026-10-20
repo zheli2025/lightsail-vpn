@@ -176,7 +176,7 @@ sudo journalctl -u domain-usage.service -n 50 --no-pager
 本地验证只使用临时目录和模拟服务调用，不读取生产密钥或调用 AWS：
 
 ```bash
-bash -n deploy.sh update.sh scripts/sub.sh scripts/geo-update.sh scripts/reload-nginx.sh
+bash -n deploy.sh update.sh migrate.sh scripts/sub.sh scripts/geo-update.sh scripts/reload-nginx.sh
 python3 -m unittest discover -s tests -v
 ```
 
@@ -205,7 +205,7 @@ sudo bash update.sh --apply
 
 省略参数也只做检查。检查不更改目标文件、不备份、不重启，不读取密码/订阅/数据库/AWS 凭据，只检查运行文件存在性、程序指纹和地区/实例元数据。较早安装没有 `.sub-state/.sub-node/.sub-token` 等文件时，会保留它的旧 sub；没有域名或套餐统计时，会提示这些组件尚未安装，而不是报整个安装不兼容。
 
-缺失组件不会在增量更新时自动创建/启用。尤其不能随意新建 `.sub-token` 或调用初始化来“修复检查”，否则可能破坏已有订阅和密码。要把基础旧服务补齐为完整服务，需要单独迁移现有订阅布局并配置新实例的地区/实例参数，不能只靠放宽检查就宣称迁移完成。
+缺失组件不会在增量更新时自动创建/启用。尤其不能随意新建 `.sub-token` 或调用初始化来“修复检查”，否则可能破坏已有订阅和密码。要把基础旧服务补齐为完整服务，使用 [基础旧安装迁移指南](docs/MIGRATE.md) 中的 `migrate.sh`，不能只靠放宽检查就宣称迁移完成。
 
 `待确认` 表示某个已安装程序是未收录旧版或有本地改动：`--check` 会列出，`--apply` 仍会停止，不盲目覆盖。如果当前没有可自动更新的代码，检查会明确说明，不表示缺失功能已经安装。
 
