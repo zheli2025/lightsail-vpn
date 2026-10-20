@@ -27,13 +27,13 @@ def ipv4(value):
 
 
 def parser():
-    p=argparse.ArgumentParser(description='复现原服务：sudo bash deploy.sh --ip IP --node 节点名 --name 订阅名 --region AWS地区 --instance-name 实例名 --email 邮箱 --accept-tos')
+    p=argparse.ArgumentParser(description='复现原服务：sudo bash deploy.sh --ip IP --node 节点名 --name 订阅名 --region AWS地区 --instance-name 实例名 [--email 邮箱] --accept-tos')
     p.add_argument('--ip',type=ipv4,required=True)
     p.add_argument('--node',required=True)
     p.add_argument('--name',default='aws-hysteria')
     p.add_argument('--region',required=True)
     p.add_argument('--instance-name',required=True)
-    p.add_argument('--email',required=True)
+    p.add_argument('--email',default=None,help='可选 ACME 联系邮箱；省略时不登记邮箱，已有账户保持不变')
     p.add_argument('--accept-tos',action='store_true',help='接受 https://letsencrypt.org/repository/ 中的服务条款')
     p.add_argument('--validate-only',action='store_true',help=argparse.SUPPRESS)
     p.add_argument('--tls',action='store_true',help=argparse.SUPPRESS)
@@ -48,12 +48,32 @@ def validate(a):
     if a.node in ('DIRECT','REJECT','PROXY'): raise ValueError('节点名不能与策略名同名')
     if not re.fullmatch(r'[a-z]{2}(?:-[a-z]+)+-\d',a.region): raise ValueError('AWS 地区格式无效')
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,254}',a.instance_name): raise ValueError('Lightsail 实例名格式无效')
-    if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',a.email): raise ValueError('邮箱格式无效')
+    if a.email is not None and not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',a.email): raise ValueError('邮箱格式无效')
     if not a.accept_tos: raise ValueError('请阅读服务条款并加入 --accept-tos')
 
 
 def params(a):
     return {k:getattr(a,k) for k in ('ip','node','name','region','instance_name','email')}
+
+
+def certbot_command(a,webroot='/var/www/html',binary='/snap/bin/certbot'):
+    contact=['--email',a.email] if a.email is not None else ['--register-unsafely-without-email']
+    return [str(binary),'certonly','--non-interactive','--agree-tos',*contact,
+            '--preferred-profile','shortlived','--webroot','--webroot-path',str(webroot),
+            '--ip-address',a.ip,'--keep-until-expiring']
+
+
+def reusable_certificate(ip,live_dir=Path('/etc/letsencrypt/live'),run=None):
+    cert=Path(live_dir)/ip/'fullchain.pem'; key=Path(live_dir)/ip/'privkey.pem'
+    renewal=Path(live_dir).parent/'renewal'/(ip+'.conf')
+    if not cert.is_file() or not key.is_file() or not renewal.is_file(): return False
+    invoke=run or (lambda command:subprocess.run(command,check=True,capture_output=True))
+    try:
+        # 只检查公开证书的 IP 和有效期；不读取私钥内容或账户文件。
+        invoke(['openssl','x509','-in',str(cert),'-noout','-checkip',ip])
+        invoke(['openssl','x509','-in',str(cert),'-noout','-checkend','86400'])
+    except (OSError,RuntimeError,subprocess.CalledProcessError): return False
+    return True
 
 
 def atomic(path,text,mode=0o600,group=None):
@@ -90,8 +110,11 @@ trafficStats:
 def initialize(a):
     wanted=params(a)
     existed=MARKER.exists()
-    if existed and json.loads(MARKER.read_text())!=wanted:
-        raise ValueError('部署参数与首次安装不同；用 sub 管理已有安装，不要用改参数重跑迁移')
+    if existed:
+        previous=json.loads(MARKER.read_text())
+        # 联系邮箱不决定服务归属；旧安装可省略 --email 重跑，保留既有登记信息。
+        if any(previous.get(k)!=v for k,v in wanted.items() if k!='email'):
+            raise ValueError('部署参数与首次安装不同；用 sub 管理已有安装，不要用改参数重跑迁移')
     if not existed:
         if (BASE/'config.yaml').exists(): raise ValueError('发现既有配置，拒绝接管')
         atomic(MARKER,json.dumps(wanted,ensure_ascii=False,indent=2)+'\n')
@@ -126,9 +149,10 @@ def main():
     if a.validate_only: return
     if os.geteuid()!=0: raise ValueError('必须 sudo 运行')
     if a.tls:
-        subprocess.run(['/snap/bin/certbot','certonly','--non-interactive','--agree-tos','--email',a.email,
-                        '--preferred-profile','shortlived','--webroot','--webroot-path','/var/www/html',
-                        '--ip-address',a.ip,'--keep-until-expiring'],check=True)
+        if reusable_certificate(a.ip):
+            print('复用现有有效 IP HTTPS 证书，不修改账户邮箱')
+            return
+        subprocess.run(certbot_command(a),check=True)
         return
     initialize(a)
 

@@ -1,6 +1,7 @@
 import hashlib
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
 import tempfile
 import types
@@ -20,6 +21,37 @@ release=module('release','verify-release.py')
 
 
 class TestParity(unittest.TestCase):
+    def test_email_is_optional_but_supplied_email_is_validated(self):
+        args=boot.parser().parse_args(['--ip','1.1.1.1','--node','节点','--region','ap-northeast-1',
+                                      '--instance-name','vpn','--accept-tos'])
+        self.assertIsNone(args.email)
+        boot.validate(args)
+        command=boot.certbot_command(args)
+        self.assertIn('--register-unsafely-without-email',command)
+        self.assertNotIn('--email',command)
+        args.email='admin@example.com'
+        boot.validate(args)
+        command=boot.certbot_command(args)
+        self.assertIn('--email',command)
+        self.assertNotIn('--register-unsafely-without-email',command)
+        args.email='not an email'
+        with self.assertRaises(ValueError): boot.validate(args)
+
+    def test_certificate_reuse_checks_public_ip_expiry_and_renewability(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            live=Path(tmp)/'live'; directory=live/'1.1.1.1'; directory.mkdir(parents=True)
+            (directory/'fullchain.pem').write_text('public certificate fixture')
+            (directory/'privkey.pem').write_text('private fixture; do not read')
+            calls=[]
+            self.assertFalse(boot.reusable_certificate('1.1.1.1',live,calls.append))
+            (Path(tmp)/'renewal').mkdir(); (Path(tmp)/'renewal/1.1.1.1.conf').touch()
+            self.assertTrue(boot.reusable_certificate('1.1.1.1',live,calls.append))
+            self.assertTrue(any('-checkip' in c for c in calls))
+            self.assertTrue(any('-checkend' in c for c in calls))
+            self.assertFalse(any('privkey.pem' in ' '.join(c) for c in calls))
+            def invalid(command): raise subprocess.CalledProcessError(1,command)
+            self.assertFalse(boot.reusable_certificate('1.1.1.1',live,invalid))
+
     def test_server_software_baseline(self):
         baseline=json.loads((ROOT/'config/software-baseline.json').read_text())['hysteria']
         # 这里只解析生成的假凭据配置，不访问生产配置。
@@ -51,6 +83,9 @@ class TestParity(unittest.TestCase):
             with patch.object(boot,'MARKER',root/'install.json'), patch.object(boot,'BASE',root/'hysteria'), patch.object(boot,'TRAFFIC',root/'traffic.conf'), patch.object(boot.os,'chown'), patch.object(boot.grp,'getgrnam',return_value=types.SimpleNamespace(gr_gid=0)), patch.object(boot.pwd,'getpwnam',return_value=types.SimpleNamespace(pw_uid=0)):
                 boot.initialize(args)
                 before={p:p.read_bytes() for p in root.rglob('*') if p.is_file()}
+                boot.initialize(args)
+                self.assertEqual(before,{p:p.read_bytes() for p in before})
+                args.email=None
                 boot.initialize(args)
                 self.assertEqual(before,{p:p.read_bytes() for p in before})
                 self.assertIn('Environment=LS_INSTANCE_NAME=vpn-tokyo-01',(root/'traffic.conf').read_text())

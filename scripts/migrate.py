@@ -266,9 +266,10 @@ class Migration:
             if not self.path('/snap/bin/certbot').exists(): self.runner(['snap','install','--classic','certbot'])
             self.write('/etc/letsencrypt/renewal-hooks/deploy/lightsail-vpn-nginx',
                        (self.repo/'scripts/reload-nginx.sh').read_bytes(),0o755)
-            self.runner([str(self.path('/snap/bin/certbot')),'certonly','--non-interactive','--agree-tos','--email',a.email,
-                         '--preferred-profile','shortlived','--webroot','--webroot-path',str(self.path('/var/www/html')),
-                         '--ip-address',a.ip,'--keep-until-expiring'])
+            if boot.reusable_certificate(a.ip,self.path('/etc/letsencrypt/live'),self.runner):
+                print('复用现有有效 IP HTTPS 证书，不修改账户邮箱')
+            else:
+                self.runner(boot.certbot_command(a,self.path('/var/www/html'),self.path('/snap/bin/certbot')))
             for name in ('fullchain.pem','privkey.pem'):
                 if not self.path('/etc/letsencrypt/live/'+a.ip+'/'+name).is_file(): raise RuntimeError('HTTPS 证书未生成')
             self.runner([str(self.path('/usr/local/bin/sub')),'update'])

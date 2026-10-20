@@ -180,3 +180,20 @@ class TestMigration(unittest.TestCase):
         opener=types.SimpleNamespace(open=lambda *args,**kwargs:io.BytesIO(b'{"streams": null}'))
         with patch.object(mod.urllib.request,'build_opener',return_value=opener):
             mod.Migration.probe_stats(self.m,'fixture-secret')
+
+    def test_migration_without_email_requests_no_email_registration(self):
+        self.args.email=None
+        with contextlib.redirect_stdout(io.StringIO()): self.m.apply(self.args)
+        commands=[c for c in self.calls if c[0].endswith('/certbot')]
+        self.assertEqual(len(commands),1)
+        self.assertIn('--register-unsafely-without-email',commands[0])
+        self.assertNotIn('--email',commands[0])
+
+    def test_existing_managed_certificate_is_reused_without_account_changes(self):
+        self.args.email=None
+        self.write('/etc/letsencrypt/live/1.1.1.1/fullchain.pem','public certificate fixture')
+        self.write('/etc/letsencrypt/live/1.1.1.1/privkey.pem','private fixture')
+        self.write('/etc/letsencrypt/renewal/1.1.1.1.conf','renewal fixture')
+        with contextlib.redirect_stdout(io.StringIO()): self.m.apply(self.args)
+        self.assertFalse(any(c[0].endswith('/certbot') for c in self.calls))
+        self.assertEqual((self.root/'etc/letsencrypt/live/1.1.1.1/privkey.pem').read_text(),'private fixture')

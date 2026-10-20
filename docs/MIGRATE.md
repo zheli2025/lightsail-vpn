@@ -23,12 +23,13 @@ sudo bash migrate.sh --check \
   --instance-name <当前Lightsail实例名> \
   --node '新地区节点名' \
   --name migrated-vpn \
-  --email <你的联系邮箱> \
   --accept-tos \
   --upgrade-hysteria
 ```
 
 替换尖括号字段，填写当前实例的信息，不是原韩国实例。migrated-vpn 必须是未占用的新订阅文件名。没有密码或 token 参数，不需要发给助手任何秘密。
+
+邮箱不是必填项。首次申请不填邮箱时，以无邮箱方式登记；如需提供联系邮箱，额外加 `--email 你的邮箱`。已有可续期、匹配 IP 且剩余有效期超过一天的证书直接复用，不改账户邮箱；过期/即将过期或缺少续期配置时再走申请流程。自动续期不依赖提供邮箱。
 
 `--check` 只显示计划，不写备份、不安装软件、不改配置或重启；解析依赖先安装。配置只在本机解析，错误不输出秘密原文。`--accept-tos` 表示已阅读 [Let's Encrypt 条款](https://letsencrypt.org/repository/)，只有 apply 才申请证书。
 
