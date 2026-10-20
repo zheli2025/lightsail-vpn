@@ -1,0 +1,34 @@
+[Unit]
+Description=Hysteria per-domain traffic usage collector
+Documentation=file:/usr/local/bin/domain-usage
+After=network-online.target hysteria-server.service
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=usage-tracker
+Group=usage-tracker
+ExecStart=/usr/local/bin/domain-usage collect
+Restart=always
+RestartSec=3
+Nice=10
+IOSchedulingClass=idle
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+ReadOnlyPaths=/etc/hysteria/.traffic-stats-secret
+ReadWritePaths=/var/lib/domain-usage /var/log/domain-usage.log /run/domain-usage
+RuntimeDirectory=domain-usage
+RuntimeDirectoryMode=0755
+Environment=DU_API_URL=http://127.0.0.1:25413/dump/streams
+Environment=DU_SECRET_FILE=/etc/hysteria/.traffic-stats-secret
+Environment=DU_DB_FILE=/var/lib/domain-usage/usage.db
+Environment=DU_LOG_FILE=/var/log/domain-usage.log
+Environment=DU_RUNTIME_DIR=/run/domain-usage
+Environment=DU_POLL_INTERVAL=5
+
+[Install]
+WantedBy=multi-user.target

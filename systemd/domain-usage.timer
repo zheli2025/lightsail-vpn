@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily maintenance for Hysteria per-domain usage database
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+Persistent=true
+RandomizedDelaySec=30m
+OnBootSec=5m
+Unit=domain-usage-prune.service
+
+[Install]
+WantedBy=timers.target

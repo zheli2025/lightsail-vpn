@@ -1,0 +1,21 @@
+[Unit]
+Description=Prune old Hysteria per-domain usage records
+
+[Service]
+Type=oneshot
+User=usage-tracker
+Group=usage-tracker
+ExecStart=/usr/local/bin/domain-usage prune --days 180
+Nice=10
+IOSchedulingClass=idle
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+ReadOnlyPaths=/etc/hysteria/.traffic-stats-secret
+ReadWritePaths=/var/lib/domain-usage /var/log/domain-usage.log /run/domain-usage
+RuntimeDirectory=domain-usage
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target

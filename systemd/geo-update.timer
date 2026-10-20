@@ -1,10 +1,12 @@
 [Unit]
-Description=Daily CN-only MRS update
+Description=Update GEOIP/GeoSite databases at Beijing 00/06/12/18
 
 [Timer]
-OnCalendar=*-*-* 03:00:00 UTC
-RandomizedDelaySec=15m
+OnCalendar=*-*-* 00,06,12,18:00:00 Asia/Shanghai
 Persistent=true
+AccuracySec=1m
+RandomizedDelaySec=120
+OnBootSec=10m
 Unit=geo-update.service
 
 [Install]

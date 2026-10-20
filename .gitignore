@@ -13,3 +13,8 @@ state.json
 .aws/
 .sub-*
 backups/
+*.db
+*.db-*
+*.sqlite*
+credentials
+config.local*

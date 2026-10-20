@@ -1,5 +1,6 @@
 [Unit]
-Description=Download CN-only MRS rules
+Description=Update Clash GEOIP/GeoSite databases (China direct bypass)
+Documentation=file:/usr/local/bin/geo-update
 After=network-online.target
 Wants=network-online.target
 
@@ -7,8 +8,14 @@ Wants=network-online.target
 Type=oneshot
 ExecStart=/usr/local/bin/geo-update update
 Nice=10
+IOSchedulingClass=idle
 PrivateTmp=true
 NoNewPrivileges=true
-ProtectSystem=strict
+ProtectSystem=full
 ProtectHome=true
-ReadWritePaths=/var/lib/lightsail-vpn/geo
+ReadWritePaths=/var/www/html/geo /var/lib/geo-update /var/log/geo-update.log /run/geo-update
+RuntimeDirectory=geo-update
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target

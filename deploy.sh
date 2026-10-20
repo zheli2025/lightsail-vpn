@@ -1,98 +1,88 @@
 #!/usr/bin/env bash
-# 全新 Ubuntu 24.04 / Lightsail 部署入口。不调用 AWS API，不读取 AWS 凭据。
+# 全新 Lightsail Ubuntu 24.04：复现原项目运行设置，不迁移旧实例的凭据或数据库。
 set -euo pipefail
 umask 077
-usage() {
-  echo '用法: sudo bash deploy.sh --ip 公网静态IPv4 --node "节点名称" --email ACME联系邮箱 [--name vpn] [--accept-tos]'
-  echo '需事先在 AWS 绑定静态 IP，并开放 TCP 80/443、UDP 443。--accept-tos 表示接受 Let’s Encrypt 服务条款。'
-}
-die() { echo "error: $*" >&2; exit 1; }
-ip='' node='' email='' name='vpn' accept=0
-while (($#)); do
-  case "$1" in
-    --ip|--node|--email|--name)
-      (($# >= 2)) || die "$1 缺少值"
-      case "$1" in --ip) ip="$2";; --node) node="$2";; --email) email="$2";; --name) name="$2";; esac
-      shift 2;;
-    --accept-tos) accept=1; shift;;
-    -h|--help) usage; exit 0;;
-    *) die "未知参数: $1";;
-  esac
-done
-[[ $EUID == 0 ]] || die '请用 sudo bash deploy.sh 运行'
-[[ -n "$ip" && -n "$node" && -n "$email" ]] || { usage; exit 2; }
-((accept)) || die '请阅读 https://letsencrypt.org/repository/ 后加入 --accept-tos'
-# 参数在任何系统修改前校验。
-python3 - "$ip" "$node" "$name" "$email" <<'PY'
-import ipaddress,re,sys
-ip,node,name,email=sys.argv[1:]
-try:
-    a=ipaddress.IPv4Address(ip)
-    assert a.is_global and not a.is_multicast
-    assert 1 <= len(node) <= 64 and not any(ord(c)<32 for c in node)
-    assert node not in ('DIRECT','REJECT','REJECT-DROP','PASS','COMPATIBLE','PROXY')
-    assert re.fullmatch(r'[a-z0-9][a-z0-9-]{0,31}',name)
-    assert re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',email)
-except (ValueError,AssertionError):
-    sys.exit('error: 检查公网 IPv4、节点名、订阅名及邮箱格式')
-PY
-source /etc/os-release
-[[ "$ID" == ubuntu && "$VERSION_ID" == 24.04 ]] || die '当前只支持 Ubuntu 24.04'
 src="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+die() { echo "error: $*" >&2; exit 1; }
+if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
+  python3 "$src/scripts/bootstrap.py" --help
+  exit 0
+fi
+[[ $EUID == 0 ]] || die '请用 sudo bash deploy.sh 运行'
+# 校验参数不读取任何配置；在安装软件/写入系统前执行。
+python3 "$src/scripts/bootstrap.py" --validate-only "$@"
+source /etc/os-release
+[[ "$ID" == ubuntu && "$VERSION_ID" == 24.04 ]] || die '只支持全新 Ubuntu 24.04 LTS'
 exec 9>/run/lightsail-vpn-deploy.lock
-flock -n 9 || die '另一个部署进程正在运行'
-# 拒绝接管原有服务；此脚本在当前生产服务器也会在此停止。
-if [[ ! -f /etc/lightsail-vpn/state.json ]]; then
+flock -n 9 || die '部署已经在运行'
+if [[ ! -f /etc/lightsail-vpn/install.json ]]; then
   for path in /etc/hysteria/config.yaml /usr/local/bin/sub /etc/nginx/sites-enabled/vpn-subscription; do
-    [[ ! -e "$path" ]] || die "检测到已有服务 $path；请在全新实例上部署"
+    [[ ! -e "$path" ]] || die "已有安装 $path；拒绝接管，请使用全新实例"
   done
   if systemctl is-active --quiet nginx || systemctl is-active --quiet hysteria-server; then
-    die '已有 Nginx/Hysteria 服务，请使用全新实例'
+    die '检测到已有服务，请使用全新专用实例'
   fi
 fi
-echo '1/6 安装系统依赖（不会改变 AWS 或 UFW 防火墙）'
+echo '1/7 安装依赖并统一为原机 UTC 时区'
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y nginx openssl curl ca-certificates python3 python3-yaml snapd zstd
-echo '2/6 下载固定版本 Hysteria 并校验官方 SHA256'
-case "$(uname -m)" in x86_64) arch=amd64;; aarch64) arch=arm64;; *) die '仅支持 amd64 / arm64';; esac
-version='2.13.0'
-tmp="$(mktemp -d /tmp/lightsail-vpn-download.XXXXXX)"
+apt-get install -y nginx openssl curl ca-certificates python3 python3-boto3 snapd
+timedatectl set-timezone Etc/UTC
+echo '2/7 安装原机版本 Hysteria 2.12.0，核对官方 SHA256'
+case "$(uname -m)" in x86_64) arch=amd64;; aarch64) arch=arm64;; *) die '仅支持 amd64/arm64';; esac
+tmp="$(mktemp -d /tmp/lightsail-vpn-release.XXXXXX)"
 trap 'rm -f "$tmp/hysteria-linux-$arch" "$tmp/hashes.txt"; rmdir "$tmp"' EXIT
-base="https://github.com/apernet/hysteria/releases/download/app/v${version}"
+base='https://github.com/apernet/hysteria/releases/download/app/v2.12.0'
 curl -fSL --retry 3 --connect-timeout 15 --max-time 600 "$base/hysteria-linux-$arch" -o "$tmp/hysteria-linux-$arch"
 curl -fSL --retry 3 --max-time 120 "$base/hashes.txt" -o "$tmp/hashes.txt"
-python3 - "$tmp" "$arch" <<'PY'
-import hashlib,pathlib,sys
-root=pathlib.Path(sys.argv[1]); name='hysteria-linux-'+sys.argv[2]
-entries=[line.split() for line in (root/'hashes.txt').read_text().splitlines()]
-expected=[row[0].lower() for row in entries if len(row)==2 and pathlib.PurePosixPath(row[1].lstrip('*')).name==name]
-if len(expected)!=1 or hashlib.sha256((root/name).read_bytes()).hexdigest()!=expected[0]:
-    sys.exit('error: 官方 SHA256 校验失败，拒绝安装')
-PY
+python3 "$src/scripts/verify-release.py" "$tmp" "hysteria-linux-$arch"
 install -m 0755 "$tmp/hysteria-linux-$arch" /usr/local/bin/hysteria
-echo '3/6 安装管理脚本、目录和 systemd 单元'
-id hysteria >/dev/null 2>&1 || useradd --system --home-dir /var/lib/hysteria --shell /usr/sbin/nologin hysteria
+echo '3/7 创建服务用户、原项目目录及统计所需权限'
+id hysteria >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin hysteria
+id usage-tracker >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin usage-tracker
 install -d -m 0700 /etc/lightsail-vpn
-install -d -m 0750 -o root -g hysteria /etc/hysteria /etc/hysteria/certs
-install -d -m 0750 -o root -g www-data /var/lib/lightsail-vpn
-install -d -m 0755 /var/lib/lightsail-vpn/geo /var/www/lightsail-vpn /usr/local/lib/lightsail-vpn
-install -m 0755 "$src/scripts/sub.py" /usr/local/bin/sub
-install -m 0755 "$src/scripts/geo-update.py" /usr/local/bin/geo-update
+install -d -m 0755 /usr/local/lib/lightsail-vpn
+install -d -m 0755 /etc/hysteria /etc/hysteria/certs /var/www/html /var/www/html/geo
+install -d -m 0700 /var/lib/geo-update /var/lib/traffic
+install -d -m 0750 -o usage-tracker -g usage-tracker /var/lib/domain-usage
+touch /var/log/geo-update.log /var/log/traffic-update.log /var/log/domain-usage.log
+chmod 0600 /var/log/geo-update.log /var/log/traffic-update.log
+chown usage-tracker:usage-tracker /var/log/domain-usage.log
+chmod 0640 /var/log/domain-usage.log
+touch /etc/nginx/subscription-userinfo.conf
+chmod 0644 /etc/nginx/subscription-userinfo.conf
+echo '4/7 生成新实例独立凭据及地区/实例参数；不覆盖已有配置'
+python3 "$src/scripts/bootstrap.py" "$@"
+install -m 0755 "$src/scripts/sub.sh" /usr/local/bin/sub
+install -m 0755 "$src/scripts/geo-update.sh" /usr/local/bin/geo-update
+install -m 0755 "$src/scripts/traffic-update.py" /usr/local/lib/lightsail-vpn/traffic-update.py
+install -m 0755 "$src/scripts/traffic-launcher.py" /usr/local/bin/traffic-update
+install -m 0755 "$src/scripts/domain-usage.py" /usr/local/bin/domain-usage
 install -m 0644 "$src/systemd/"* /etc/systemd/system/
+install -m 0644 "$src/config/99-lightsail-vpn.conf" /etc/sysctl.d/99-lightsail-vpn.conf
+sysctl -p /etc/sysctl.d/99-lightsail-vpn.conf
 systemctl daemon-reload
-echo '4/6 初始化配置；生成独立密码（失败后用同一命令重跑）'
-sub init --ip "$ip" --node "$node" --name "$name" --email "$email"
-echo '5/6 安装 Certbot，申请 IP HTTPS 证书并启用续期'
+systemctl enable --now nginx
+# 原版 sub update 生成 HTTP 站点，提供 Certbot webroot 验证路径。
+/usr/local/bin/sub update
+echo '5/7 IP HTTPS：安装 Certbot、申请短期证书、启用自动续期'
 if ! snap list certbot >/dev/null 2>&1; then snap install --classic certbot; fi
-# Certbot webroot IP 证书要求 >=5.4；版本由 snap 维护。
 install -d -m 0755 /etc/letsencrypt/renewal-hooks/deploy
 install -m 0755 "$src/scripts/reload-nginx.sh" /etc/letsencrypt/renewal-hooks/deploy/lightsail-vpn-nginx
-sub tls
+python3 "$src/scripts/bootstrap.py" --tls "$@"
 systemctl enable --now snap.certbot.renew.timer
-echo '6/6 首次下载 CN MRS，启用服务与每日更新'
-geo-update update
-sub update
-systemctl enable --now nginx hysteria-server.service geo-update.timer
-sub status
-echo '部署完成。订阅 URL 含私密令牌，仅在你主动执行 sudo sub url 时显示。'
+/usr/local/bin/sub update
+echo '6/7 首次下载全部五份 Geo 数据，启动 Hysteria 和域名采集器'
+/usr/local/bin/geo-update update
+systemctl enable --now hysteria-server.service
+systemctl restart hysteria-server.service
+systemctl is-active --quiet hysteria-server.service
+systemctl enable --now domain-usage.service domain-usage.timer geo-update.timer traffic-update.timer
+systemctl restart domain-usage.service
+echo '7/7 首次获取 AWS 流量（需要你在新实例手动配置只读 AWS 身份）'
+if ! systemctl start --wait traffic-update.service; then
+  echo 'warning: AWS 流量获取失败；VPN 已安装，但订阅套餐流量尚未就绪。按 README 配置身份后运行 sudo systemctl start traffic-update.service。'
+fi
+/usr/local/bin/sub status
+echo '部署步骤完成。仍需按 README 验证公网 TCP/UDP、订阅及域名采集。'
+echo '查看含令牌的订阅链接：sudo sub url。部分原版 sub 操作也会输出该链接，请勿分享终端日志。'

@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+#
+# traffic-update - 获取 Lightsail 月度流量配额/用量，并写入 Nginx 订阅响应头
+#
+# 用法:
+#   sudo traffic-update update   立即获取并发布（默认）
+#   sudo traffic-update status   查看缓存与状态
+#
+# 数据来源:
+#   - 配额: lightsail GetInstance -> networking.monthlyTransfer.gbPerMonthAllocated
+#   - 用量: lightsail GetInstanceMetricData NetworkIn/NetworkOut Sum（每月 1 日 UTC 起累计）
+#   - 凭据: 实例 IAM 角色（IMDSv2）或标准 AWS 凭据链
+#
+# 发布方式:
+#   - 状态写入 /var/lib/traffic/state.json（原子替换）
+#   - Nginx 头写入 /etc/nginx/subscription-userinfo.conf（原子替换 + reload）
+#   - 与 sub update 异步: 各自只写自己的文件，互不调用
+#
+import calendar
+import datetime
+import fcntl
+import json
+import os
+import shutil
+import subprocess
+import sys
+
+STATE_DIR = os.environ.get("TRAFFIC_STATE_DIR", "/var/lib/traffic")
+STATE_FILE = os.environ.get("TRAFFIC_STATE_FILE", os.path.join(STATE_DIR, "state.json"))
+LOG_FILE = os.environ.get("TRAFFIC_LOG_FILE", "/var/log/traffic-update.log")
+LOCK_DIR = os.environ.get("TRAFFIC_LOCK_DIR", "/run/traffic-update")
+LOCK_FILE = os.path.join(LOCK_DIR, "lock")
+NGINX_SNIPPET = os.environ.get(
+    "TRAFFIC_NGINX_SNIPPET", "/etc/nginx/subscription-userinfo.conf"
+)
+
+REGION = os.environ.get("LS_REGION", "ap-northeast-2")
+INSTANCE_NAME = os.environ.get("LS_INSTANCE_NAME") or None
+PRIVATE_IP = os.environ.get("LS_PRIVATE_IP", "172.26.53.159")
+PUBLIC_IP = os.environ.get("LS_PUBLIC_IP", "43.200.18.124")
+TOTAL_GB_OVERRIDE = os.environ.get("LS_TOTAL_GB")
+
+
+def log(msg):
+    line = f"{datetime.datetime.now(datetime.timezone.utc).isoformat()} {msg}"
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except OSError:
+        pass
+    print(line)
+
+
+def rotate_log():
+    try:
+        if os.path.getsize(LOG_FILE) > 1_000_000:
+            os.replace(LOG_FILE, LOG_FILE + ".1")
+            open(LOG_FILE, "a", encoding="utf-8").close()
+    except OSError:
+        pass
+
+
+def acquire_lock():
+    os.makedirs(LOCK_DIR, exist_ok=True)
+    fd = os.open(LOCK_FILE, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("traffic-update: 已有更新任务在运行，跳过本次")
+        sys.exit(0)
+    return fd
+
+
+def load_state():
+    try:
+        with open(STATE_FILE, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(state):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(state, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, STATE_FILE)
+
+
+def get_client():
+    import boto3
+
+    return boto3.client("lightsail", region_name=REGION)
+
+
+def find_instance(client):
+    if INSTANCE_NAME:
+        return client.get_instance(instanceName=INSTANCE_NAME)["instance"]
+    instances = client.get_instances()["instances"]
+    for inst in instances:
+        if inst.get("privateIpAddress") == PRIVATE_IP or inst.get(
+            "publicIpAddress"
+        ) == PUBLIC_IP:
+            return inst
+    if instances:
+        return instances[0]
+    raise RuntimeError("未找到 Lightsail 实例")
+
+
+def total_bytes(instance):
+    gb = None
+    monthly = instance.get("networking", {}).get("monthlyTransfer", {})
+    if monthly.get("gbPerMonthAllocated"):
+        gb = float(monthly["gbPerMonthAllocated"])
+    elif TOTAL_GB_OVERRIDE:
+        gb = float(TOTAL_GB_OVERRIDE)
+    if not gb or gb <= 0:
+        raise RuntimeError("无法确定月度流量配额（gbPerMonthAllocated 缺失）")
+    return int(gb * 1024**3)
+
+
+def month_bounds(now):
+    start = datetime.datetime(
+        now.year, now.month, 1, tzinfo=datetime.timezone.utc
+    )
+    last_day = calendar.monthrange(now.year, now.month)[1]
+    end_reset = datetime.datetime(
+        now.year, now.month, last_day, 23, 59, 59, tzinfo=datetime.timezone.utc
+    )
+    return start, end_reset
+
+
+def metric_sum(client, instance_name, metric, start, end):
+    resp = client.get_instance_metric_data(
+        instanceName=instance_name,
+        metricName=metric,
+        period=3600,
+        startTime=start,
+        endTime=end,
+        unit="Bytes",
+        statistics=["Sum"],
+    )
+    return int(sum(point.get("sum") or 0 for point in resp.get("metricData", [])))
+
+
+def header_value(state):
+    # Subscription-Userinfo: Clash/mihomo/sing-box 等客户端读取订阅流量。
+    # Profile-Update-Interval: CMFA 等客户端以此设置自动更新周期（单位小时），
+    # 重新拉取订阅时才会刷新流量信息，因此一并下发。
+    return (
+        'add_header Subscription-Userinfo "upload={upload}; download={download}; '
+        "total={total}; expire={expire}\" always;\n"
+        "add_header Profile-Update-Interval 12 always;\n"
+    ).format(**state)
+
+
+def run_cmd(cmd):
+    path = shutil.which(cmd[0]) or cmd[0]
+    return subprocess.run(
+        [path] + cmd[1:], check=True, capture_output=True, text=True
+    )
+
+
+def write_snippet(header):
+    os.makedirs(os.path.dirname(NGINX_SNIPPET), exist_ok=True)
+    tmp = NGINX_SNIPPET + ".tmp"
+    new_content = "# generated by traffic-update, do not edit\n" + header
+    old_content = None
+    try:
+        with open(NGINX_SNIPPET, encoding="utf-8") as fh:
+            old_content = fh.read()
+    except OSError:
+        pass
+    if old_content == new_content:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(new_content)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, NGINX_SNIPPET)
+    try:
+        run_cmd(["nginx", "-t"])
+    except subprocess.CalledProcessError as exc:
+        if old_content is not None:
+            with open(NGINX_SNIPPET, "w", encoding="utf-8") as fh:
+                fh.write(old_content)
+        raise RuntimeError(f"nginx -t 失败，已回滚订阅头: {exc.stderr.strip()}") from exc
+    run_cmd(["systemctl", "reload", "nginx"])
+    return True
+
+
+def cmd_update():
+    rotate_log()
+    acquire_lock()
+    log("== 开始 Lightsail 流量更新 ==")
+    state = load_state()
+    try:
+        client = get_client()
+        instance = find_instance(client)
+        name = instance["name"]
+        total = total_bytes(instance)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        start, end_reset = month_bounds(now)
+        upload = metric_sum(client, name, "NetworkIn", start, now)
+        download = metric_sum(client, name, "NetworkOut", start, now)
+        used = upload + download
+        remaining = max(total - used, 0)
+        state.update(
+            {
+                "fetched_at": now.isoformat(),
+                "instance_name": name,
+                "total": total,
+                "upload": upload,
+                "download": download,
+                "used": used,
+                "remaining": remaining,
+                "expire": int(end_reset.timestamp()),
+                "quota_gb": round(total / 1024**3, 2),
+            }
+        )
+        save_state(state)
+        changed = write_snippet(header_value(state))
+        log(
+            f"OK {name}: 总 {state['quota_gb']:.2f} GB, "
+            f"已用 {used / 1024**3:.2f} GB, 剩余 {remaining / 1024**3:.2f} GB"
+            + ("（Nginx 头已更新）" if changed else "（Nginx 头无变化）")
+        )
+        return 0
+    except Exception as exc:
+        log(f"ERROR 流量获取失败: {type(exc).__name__}: {exc}")
+        if state.get("total"):
+            try:
+                write_snippet(header_value(state))
+                log("已沿用旧流量头")
+            except Exception as exc2:
+                log(f"ERROR 旧流量头写入失败: {type(exc2).__name__}: {exc2}")
+        return 1
+
+
+def cmd_status():
+    state = load_state()
+    print("状态文件:", STATE_FILE)
+    if state.get("total"):
+        print(f"实例: {state.get('instance_name')}")
+        print(f"总流量: {state['total'] / 1024**3:.2f} GB")
+        print(
+            f"已用流量: {state['used'] / 1024**3:.2f} GB"
+            f"（上传 {state['upload'] / 1024**3:.2f} / 下载 {state['download'] / 1024**3:.2f} GB）"
+        )
+        print(f"剩余流量: {state['remaining'] / 1024**3:.2f} GB")
+        print(
+            "重置时间: "
+            + datetime.datetime.fromtimestamp(
+                state["expire"], datetime.timezone.utc
+            ).isoformat()
+        )
+        print(f"最后更新: {state.get('fetched_at')}")
+        print(
+            f"订阅头: upload={state['upload']}; download={state['download']}; "
+            f"total={state['total']}; expire={state['expire']}"
+        )
+    else:
+        print("流量信息: 尚未获取成功")
+        print(
+            "请先在 AWS IAM 给角色 AmazonLightsailInstanceRole 附加 "
+            "AmazonLightsailReadOnlyAccess（或最小只读策略），"
+            "然后运行: sudo sub traffic update"
+        )
+    print("Nginx 订阅头文件:", NGINX_SNIPPET)
+    try:
+        active = subprocess.run(
+            ["systemctl", "is-active", "traffic-update.timer"],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+        print("定时器:", active)
+    except OSError:
+        print("定时器: 未知")
+
+
+if __name__ == "__main__":
+    action = sys.argv[1] if len(sys.argv) > 1 else "update"
+    if action == "update":
+        sys.exit(cmd_update())
+    elif action == "status":
+        cmd_status()
+    else:
+        print("用法: traffic-update update|status", file=sys.stderr)
+        sys.exit(2)

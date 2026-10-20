@@ -1,0 +1,21 @@
+[Unit]
+Description=Update Lightsail traffic usage for Clash subscription
+Documentation=file:/usr/local/bin/traffic-update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/traffic-update update
+Nice=10
+IOSchedulingClass=idle
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/var/lib/traffic /var/log/traffic-update.log /run/traffic-update /etc/nginx
+RuntimeDirectory=traffic-update
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target

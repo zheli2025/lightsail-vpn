@@ -1,0 +1,13 @@
+[Unit]
+Description=Update Lightsail traffic usage every 30 minutes
+
+[Timer]
+OnCalendar=*:0/30
+Persistent=true
+AccuracySec=1m
+RandomizedDelaySec=60
+OnBootSec=2m
+Unit=traffic-update.service
+
+[Install]
+WantedBy=timers.target
