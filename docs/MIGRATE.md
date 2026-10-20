@@ -6,7 +6,7 @@
 
 - Hysteria password 认证、Salamander、UDP 443。
 - 自签证书/私钥路径为 `/etc/hysteria/certs/server.crt`、`server.key`，公网 IP 与证书 SAN 一致。
-- Nginx 启用站点只有 default；额外网站、半迁移状态、其他运行用户/证书布局会停止，不猜测覆盖。
+- Nginx 使用 default，或额外旧静态 VPN 站点已经脱敏诊断并显式选择接管；其他网站、半迁移状态和不同运行用户/证书布局会停止，不猜测覆盖。
 - AWS 已绑定静态 IP，开放 TCP 80/443、UDP 443；TCP 80 允许 CA 验证。
 
 迁移保留认证密码、混淆密码、TLS 证书/私钥及附加 Hysteria 设置，不轮换代理秘密。只规范 YAML 引号/顺序并增加本地 trafficStats，不保留注释格式。新统计 secret 和订阅 token 在目标机生成；新订阅 URL 需重新导入。原历史数据库不删除、不重置，AWS 身份不读取/复制。
@@ -32,6 +32,26 @@ sudo bash migrate.sh --check \
 邮箱不是必填项。首次申请不填邮箱时，以无邮箱方式登记；如需提供联系邮箱，额外加 `--email 你的邮箱`。已有可续期、匹配 IP 且剩余有效期超过一天的证书直接复用，不改账户邮箱；过期/即将过期或缺少续期配置时再走申请流程。自动续期不依赖提供邮箱。
 
 `--check` 只显示计划，不写备份、不安装软件、不改配置或重启；解析依赖先安装。配置只在本机解析，错误不输出秘密原文。`--accept-tos` 表示已阅读 [Let's Encrypt 条款](https://letsencrypt.org/repository/)，只有 apply 才申请证书。
+
+### 提示额外 Nginx 启用站点时
+
+不需要删除配置，也不要改名为 default 来绕过检查。先单独运行（无需 IP、地区或其他参数）：
+
+```bash
+sudo bash migrate.sh --inspect-nginx
+```
+
+输出只含站点文件名、监听端口、路由类别和不能识别的原因，不输出域名、订阅路径、token 或配置原文。`candidate: true` 仅表示符合受限的标准目录、80/443、Geo/YAML 静态路由特征，不能替你确认站点归属。
+
+确认候选确实只用于旧 VPN 后，在原迁移 `--check` 命令末尾添加诊断中的文件名，例如：
+
+```text
+--adopt-nginx-site hysteria-sub.conf
+```
+
+多个旧 VPN 站点可重复该参数，check/apply 两步都保留。只有选定且符合受限识别的站点才会接管；未选定的额外站点仍会阻止迁移。反向代理、域名网站、其他根目录、不确定的路由/外部 include、conf.d 或全局额外 server 不会被强制接管，应单独审查。
+
+迁移会备份并停用选定启用项，再由新 VPN 站点接管。符号链接对应的 sites-available 源文件不动；直接写在 sites-enabled 的普通配置保存在 root 私密备份中。失败时恢复原启用项及默认站点。请只分享诊断输出，不要粘贴完整 Nginx 配置（可能含 token）。
 
 ## 明确执行
 

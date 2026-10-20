@@ -197,3 +197,43 @@ class TestMigration(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()): self.m.apply(self.args)
         self.assertFalse(any(c[0].endswith('/certbot') for c in self.calls))
         self.assertEqual((self.root/'etc/letsencrypt/live/1.1.1.1/privkey.pem').read_text(),'private fixture')
+
+    def old_vpn_site(self,name='legacy-vpn'):
+        text='server { listen 80; server_name _; root /var/www/html; location /geo/ {alias /var/www/html/geo/;} location = /old.yaml {try_files $uri =404;} }'
+        self.write('/etc/nginx/sites-available/'+name,text)
+        link=self.root/'etc/nginx/sites-enabled'/name
+        link.symlink_to(self.root/'etc/nginx/sites-available'/name)
+        return link,text
+
+    def test_legacy_vpn_site_requires_selection_then_is_adopted(self):
+        link,text=self.old_vpn_site()
+        with self.assertRaises(ValueError): self.m.preflight(self.args)
+        self.args.adopt_nginx_site=['legacy-vpn']
+        with contextlib.redirect_stdout(io.StringIO()): self.m.apply(self.args)
+        self.assertFalse(link.exists())
+        self.assertEqual((self.root/'etc/nginx/sites-available/legacy-vpn').read_text(),text)
+
+    def test_adopted_site_link_is_restored_on_failure(self):
+        link,text=self.old_vpn_site()
+        self.args.adopt_nginx_site=['legacy-vpn']; self.fail_at='certonly'
+        with self.assertRaises(RuntimeError),contextlib.redirect_stdout(io.StringIO()): self.m.apply(self.args)
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(link.read_text(),text)
+
+    def test_explicit_selection_cannot_override_real_website(self):
+        self.write('/etc/nginx/sites-enabled/website','server {listen 80; server_name app.example; location / {proxy_pass http://127.0.0.1:3000;} }')
+        self.args.adopt_nginx_site=['website']
+        with self.assertRaises(ValueError): self.m.preflight(self.args)
+
+    def test_selection_does_not_accept_paths(self):
+        self.args.adopt_nginx_site=['../../other']
+        with self.assertRaises(ValueError): self.m.preflight(self.args)
+
+    def test_regular_enabled_site_is_backed_up_and_restored(self):
+        text='server {listen 80; root /var/www/html; location /geo/ {alias /var/www/html/geo/;} }'
+        self.write('/etc/nginx/sites-enabled/legacy-direct.conf',text)
+        self.args.adopt_nginx_site=['legacy-direct.conf']; self.fail_at='certonly'
+        with self.assertRaises(RuntimeError),contextlib.redirect_stdout(io.StringIO()): self.m.apply(self.args)
+        file=self.root/'etc/nginx/sites-enabled/legacy-direct.conf'
+        self.assertFalse(file.is_symlink())
+        self.assertEqual(file.read_text(),text)

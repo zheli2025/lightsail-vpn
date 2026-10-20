@@ -28,6 +28,7 @@ def load(name,file):
 
 boot=load('migration_bootstrap','bootstrap.py')
 up=load('migration_update','update.py')
+layout=load('migration_nginx_layout','nginx_layout.py')
 SNAPSHOT=[*up.FILES,'/usr/local/bin/hysteria','/etc/hysteria/config.yaml',
           '/etc/hysteria/.sub-state','/etc/hysteria/.sub-node','/etc/hysteria/.sub-token',
           '/etc/hysteria/.traffic-stats-secret','/etc/nginx/sites-available/vpn-subscription',
@@ -44,6 +45,7 @@ class Migration:
     def __init__(self,root=Path('/'),repo=REPO,runner=None):
         self.root=Path(root); self.repo=Path(repo); self.updater=up.Updater(root,repo,runner)
         self.runner=runner or self.updater.run
+        self.adopted_sites=[]
 
     def path(self,path): return self.updater.path(path)
 
@@ -79,6 +81,21 @@ class Migration:
             raise ValueError('公开目录有订阅符号链接或非普通 YAML 文件，需先人工核对')
         return files
 
+    def nginx_sites(self,a):
+        reports=layout.inspect_sites(self.root)
+        selected=list(dict.fromkeys(getattr(a,'adopt_nginx_site',[]) or []))
+        if any(not layout.NAME.fullmatch(name) or name=='default' for name in selected):
+            raise ValueError('--adopt-nginx-site 需填写诊断列出的非 default 站点文件名')
+        by_name={report['name']:report for report in reports}
+        for name in selected:
+            if name not in by_name or not by_name[name]['candidate']:
+                raise ValueError('所选站点不是受支持的静态 VPN 候选；先运行 sudo bash migrate.sh --inspect-nginx 核对，不会强行覆盖')
+        remaining=[r for r in reports if r['name']!='default' and r['name'] not in selected]
+        if remaining:
+            names=', '.join(r['name'] if layout.NAME.fullmatch(r['name']) else '<非标准文件名>' for r in remaining)
+            raise ValueError('额外启用站点尚未确认：'+names+'；先运行 sudo bash migrate.sh --inspect-nginx，候选站点可显式 --adopt-nginx-site 文件名')
+        self.adopted_sites=selected
+
     def preflight(self,a):
         boot.validate(a)
         if self.root==Path('/'):
@@ -95,9 +112,7 @@ class Migration:
             if self.path(path).exists(): raise ValueError('已有订阅状态或站点，不能用基础迁移入口重复接管；使用 update.sh 或先核对布局')
         if self.path('/var/www/html/'+a.name+'.yaml').exists():
             raise ValueError('新订阅文件名已存在；换一个 --name，不覆盖旧订阅')
-        enabled=self.path('/etc/nginx/sites-enabled')
-        if enabled.exists() and any(p.name!='default' for p in enabled.iterdir()):
-            raise ValueError('存在额外 Nginx 启用站点，需先核对路由，不能自动接管')
+        self.nginx_sites(a)
         configs=list(self.path('/etc/nginx/conf.d').glob('*.conf'))
         if self.path('/etc/nginx/nginx.conf').exists(): configs.append(self.path('/etc/nginx/nginx.conf'))
         for file in configs:
@@ -133,6 +148,8 @@ class Migration:
         print('  生成新的订阅路径/token；客户端链接需要重新导入')
         if self.public_yaml():
             print('  发现旧公开 YAML 订阅；需加 --archive-old-subscriptions 移入 root 私密备份，防止旧鉴权被绕过')
+        for name in self.adopted_sites:
+            print('  备份并停用你选定的旧静态 VPN 站点：'+name+'；源配置或私密备份保留，失败时恢复启用项')
         print('  接管默认 Nginx 站点，配置新 IP HTTPS 订阅，启用原版四次/日 Geo 定时器')
         print('  下载规则，重启 Hysteria 和域名采集；代理会短暂断线')
         print('  AWS 凭据不读取/复制，套餐统计可能仍需你手动配置只读身份')
@@ -145,7 +162,8 @@ class Migration:
         directory.mkdir(parents=True,mode=0o700); directory.parent.chmod(0o700)
         targets=SNAPSHOT+['/var/www/html/'+a.name+'.yaml']
         targets += ['/var/www/html/'+p.name for p in self.public_yaml()]
-        manifest={'files':[],'units':{},'status':'prepared','subscription':a.name}
+        targets += ['/etc/nginx/sites-enabled/'+name for name in self.adopted_sites]
+        manifest={'files':[],'units':{},'status':'prepared','subscription':a.name,'adopted_sites':list(self.adopted_sites)}
         for target in targets:
             if target=='/usr/local/bin/hysteria' and not a.upgrade_hysteria: continue
             path=self.path(target); entry={'target':target,'exists':path.exists() or path.is_symlink()}
@@ -227,6 +245,8 @@ class Migration:
             os.environ.setdefault('DEBIAN_FRONTEND','noninteractive')
             if manifest['units']['geo-update.timer']['active']:
                 self.runner(['systemctl','stop','geo-update.timer'])
+            for name in self.adopted_sites: self.path('/etc/nginx/sites-enabled/'+name).unlink()
+            if self.adopted_sites: print('已备份并停用选定旧 VPN 站点；源配置或私密备份可用于恢复')
             for file in public: file.unlink()
             if public: print('旧公开订阅已移入本次 root 私密备份；可恢复，不再公开提供旧文件')
             self.runner(['apt-get','install','-y','python3-boto3'])
@@ -299,6 +319,10 @@ class Migration:
         name=manifest['subscription']
         if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,31}',name): raise ValueError('备份订阅标识无效')
         allowed=set(SNAPSHOT)|{'/var/www/html/'+name+'.yaml'}
+        adopted=manifest.get('adopted_sites',[])
+        if any(not isinstance(site,str) or not layout.NAME.fullmatch(site) or site=='default' for site in adopted):
+            raise ValueError('备份站点标识不合法')
+        allowed.update('/etc/nginx/sites-enabled/'+site for site in adopted)
         for entry in manifest['files']:
             target=Path(entry['target'])
             archived=target.parent==Path('/var/www/html') and target.suffix.lower() in ('.yaml','.yml')
@@ -333,6 +357,12 @@ class Migration:
 
 
 def main():
+    if '--inspect-nginx' in sys.argv[1:]:
+        if sys.argv[1:]!=['--inspect-nginx']: raise ValueError('--inspect-nginx 请单独运行，不需要 IP、邮箱或其他迁移参数')
+        if os.geteuid()!=0: raise ValueError('请用 sudo bash migrate.sh --inspect-nginx 运行')
+        reports=layout.inspect_sites()
+        print(json.dumps({'sites':reports,'note':'candidate 仅表示受限静态 VPN 候选，仍需你确认用途；不输出 token、域名、订阅路径或配置原文'},ensure_ascii=False,indent=2))
+        return
     p=boot.parser()
     p.description='基础旧安装迁移：保留认证和证书，补齐订阅与统计；默认只检查'
     action=p.add_mutually_exclusive_group()
@@ -341,6 +371,8 @@ def main():
     p.add_argument('--replace-legacy-code',action='store_true',help='显式同意备份并替换旧 sub/Geo 程序')
     p.add_argument('--upgrade-hysteria',action='store_true',help='备份原二进制并升级到 2.12.0')
     p.add_argument('--archive-old-subscriptions',action='store_true',help='将旧公开 YAML 订阅归档至 root 私密备份，旧链接需替换')
+    p.add_argument('--adopt-nginx-site',action='append',default=[],metavar='NAME',help='显式备份并停用诊断认可的旧静态 VPN 站点，可重复指定')
+    p.add_argument('--inspect-nginx',action='store_true',help='单独运行，仅输出脱敏 Nginx 路由结构，不需要其他参数')
     a=p.parse_args()
     if a.tls or a.validate_only: raise ValueError('不支持初始化入口的内部参数')
     if os.geteuid()!=0: raise ValueError('请用 sudo bash migrate.sh 运行')
