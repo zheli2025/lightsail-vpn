@@ -23,7 +23,7 @@
 
 ## 2. clone 后部署
 
-**已经安装本项目完整旧版服务的实例，请跳到下面“旧实例增量更新”，不要运行 deploy.sh。** `deploy.sh` 用于新实例；`update.sh` 用于保留原设置和数据的代码更新。
+**已经安装旧版服务的实例，请跳到下面“旧实例增量更新”，不要运行 deploy.sh。** `deploy.sh` 用于新实例；`update.sh` 用于保留原设置和数据的代码更新。
 
 ```bash
 sudo apt-get update
