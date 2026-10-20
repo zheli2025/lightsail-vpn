@@ -2,7 +2,7 @@
 
 在另一个地区的全新 **Ubuntu 24.04 LTS Lightsail** 实例上复现当前项目的功能和已核对设置。支持 amd64 / arm64；不修改旧实例、不迁移旧秘密。与第一版精简仓库不同，这个版本恢复原版 `sub`、全量 Geo 缓存、AWS 套餐流量、域名用量采集及 TUI。
 
-完整对照、原版哈希、两处兼容修复和不能核对的边界见 [docs/PARITY.md](docs/PARITY.md)。没有读取原机含密钥的服务 YAML，因此不能宣称其中未知的额外字段也已逐项复刻；这不是整机磁盘镜像。
+完整对照、原版哈希和两处兼容修复见 [docs/PARITY.md](docs/PARITY.md)。实际服务及订阅的非敏感配置已经现场核对，结果见 [config/software-baseline.json](config/software-baseline.json)。复现服务设置、分流规则和流量记录功能；原机密钥、IP、订阅地址不复制，新实例独立生成/填写。流量历史不迁移，这也不是整机磁盘镜像。
 
 ## 1. AWS 控制台手动操作
 

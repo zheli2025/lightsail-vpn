@@ -1,5 +1,6 @@
 import hashlib
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import types
@@ -19,6 +20,17 @@ release=module('release','verify-release.py')
 
 
 class TestParity(unittest.TestCase):
+    def test_server_software_baseline(self):
+        baseline=json.loads((ROOT/'config/software-baseline.json').read_text())['hysteria']
+        # 这里只解析生成的假凭据配置，不访问生产配置。
+        text=boot.configuration('fixture-auth','fixture-obfs','fixture-stats')
+        roots=[line.split(':',1)[0] for line in text.splitlines() if line and not line.startswith(' ')]
+        self.assertEqual(set(roots),set(baseline))
+        self.assertIn('listen: '+baseline['listen'],text)
+        self.assertIn('  listen: '+baseline['trafficStats']['listen'],text)
+        self.assertIn('  type: '+baseline['auth']['type'],text)
+        self.assertIn('  type: '+baseline['obfs']['type'],text)
+
     def test_original_hashes_with_only_documented_fixes(self):
         for line in (ROOT/'baseline.sha256').read_text().splitlines():
             expected,file=line.split(maxsplit=1)

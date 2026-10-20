@@ -1,5 +1,6 @@
 """原版 Bash sub 的隔离测试：模拟服务和证书操作，不读取生产配置。"""
 import os
+import json
 from pathlib import Path
 import subprocess
 import shutil
@@ -101,6 +102,20 @@ elif a[0]=='delete':
         self.assertIn('password: "fixture-auth"',yaml)
         self.assertIn('listen 80;',site); self.assertIn('listen 443 ssl;',site)
         self.assertIn('include '+str(self.nginx/'userinfo'),site)
+
+    def test_generated_rules_match_live_software_baseline(self):
+        self.command('update')
+        baseline=json.loads((ROOT/'config/software-baseline.json').read_text())['clash']
+        text=(self.web/'test-vpn.yaml').read_text()
+        rules=[line.strip()[2:] for line in text.split('rules:\n',1)[1].splitlines() if line.strip().startswith('- ')]
+        self.assertEqual(rules,baseline['rules'])
+        for key in ('mixed-port','allow-lan','mode','log-level','ipv6'):
+            value=baseline[key]
+            if isinstance(value,bool): value=str(value).lower()
+            self.assertIn(f'{key}: {value}\n',text)
+        for name,expected in baseline['providers'].items():
+            block=text.split('  '+name+':\n',1)[1].split('\n\n',1)[0].split('\n  cn-ip:',1)[0]
+            for key,value in expected.items(): self.assertIn(f'    {key}: {value}',block)
 
     def test_token_rotates_and_validation_rolls_back(self):
         self.command('update'); old=(self.root/'token').read_text()

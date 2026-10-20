@@ -1,0 +1,35 @@
+{
+  "verified_at": "2026-10-20",
+  "hysteria": {
+    "listen": ":443",
+    "auth": {"type": "password"},
+    "obfs": {"type": "salamander"},
+    "tls": {"certificate_mode": "local-files"},
+    "trafficStats": {"listen": "127.0.0.1:25413"}
+  },
+  "clash": {
+    "mixed-port": 7890,
+    "allow-lan": false,
+    "mode": "rule",
+    "log-level": "info",
+    "ipv6": false,
+    "proxy": {"type": "hysteria2", "port": 443, "obfs": "salamander", "skip-cert-verify": true},
+    "rules": [
+      "IP-CIDR,127.0.0.0/8,DIRECT,no-resolve",
+      "IP-CIDR,10.0.0.0/8,DIRECT,no-resolve",
+      "IP-CIDR,172.16.0.0/12,DIRECT,no-resolve",
+      "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve",
+      "IP-CIDR,100.64.0.0/10,DIRECT,no-resolve",
+      "IP-CIDR6,::1/128,DIRECT,no-resolve",
+      "IP-CIDR6,fc00::/7,DIRECT,no-resolve",
+      "IP-CIDR6,fe80::/10,DIRECT,no-resolve",
+      "RULE-SET,cn-domain,DIRECT",
+      "RULE-SET,cn-ip,DIRECT,no-resolve",
+      "MATCH,PROXY"
+    ],
+    "providers": {
+      "cn-domain": {"type": "http", "behavior": "domain", "format": "mrs", "path": "./rule-set/geosite-cn.mrs", "interval": 86400},
+      "cn-ip": {"type": "http", "behavior": "ipcidr", "format": "mrs", "path": "./rule-set/geoip-cn.mrs", "interval": 86400}
+    }
+  }
+}

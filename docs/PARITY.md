@@ -1,6 +1,8 @@
 # 原服务复现范围与核对依据
 
-核对日期：2026-10-20。只核对项目源码、已安装可执行程序的哈希、非敏感 systemd 单元、时区及五项内核参数；不读取原机 YAML、密码、token、私钥、AWS 凭据、订阅文件或 SQLite 历史数据。
+核对日期：2026-10-20。复现范围是软件服务配置、分流规则、流量记录及管理行为；不包括原实例密钥、IP、订阅地址或历史数据。
+
+已核对项目源码、已安装可执行程序的哈希、非敏感 systemd 单元、时区及五项内核参数，并现场提取了 Hysteria 配置及当前订阅中的非敏感设置。过滤在本机完成：不输出或复制密码、token、统计 API secret、节点/订阅地址；不读取私钥文件、AWS 凭据文件或 SQLite 历史数据。核对结果保存于 `config/software-baseline.json`。
 
 `baseline.sha256` 保存原机版本的哈希。原机 `/usr/local/bin/sub`、`geo-update`、`traffic-update`、`domain-usage` 与父项目对应源文件哈希一致。7 个 Geo/统计 systemd 文件也与原机安装文件一致。仓库使用这些源码，不再使用第一版独立 Python 订阅管理器。
 
@@ -28,9 +30,13 @@
 
 为支持不同地区，`/usr/local/bin/traffic-update` 是一个读取同一份 `migrate.conf` 的薄启动器，原版核心脚本安装在 `/usr/local/lib/lightsail-vpn/traffic-update.py`。这样 `sub traffic update` 手动调用也使用正确实例，而不只有 systemd timer 获得 Environment 参数；`sub ip` 更新该文件后立即对两者生效。这是部署参数适配，不改变统计算法。
 
-## 已知边界
+## 实际配置核对结论
 
-没有读取含密钥的原机 `/etc/hysteria/config.yaml`，因此不能声称其中尚未公开的附加配置（例如自定义 ACL、resolver、sniff 或限速）已经逐项核对。本仓库生成项目源码能够确认的 Hysteria 基础配置与 trafficStats。也没有复制整个操作系统、Nginx 全局配置或锁定所有 apt/snap 软件包版本。复现的是已核对的项目功能及上述运行设置，不是磁盘镜像。
+当前 Hysteria 的顶层配置只有 listen、tls、auth、obfs、trafficStats；没有额外 resolver、sniff、ACL、带宽或 QUIC 参数。仓库初始化配置的结构和所有非敏感值与实际配置一致。当前生效的 Clash 订阅也已逐项核对：基础选项、协议/端口、PROXY 组、两个 MRS provider 的格式/路径/间隔及全部规则均一致，仅替换新实例的名称、地址和秘密。
+
+域名采集、Geo 更新和 Hysteria 服务没有额外 systemd drop-in；套餐流量服务只有用于地区/实例参数的 migrate.conf。三个 timer 的现场定义与仓库文件一致。流量记录的算法、分类、5 秒采集、SQLite 结构、保留期、TUI 和订阅头仍使用同源代码；只保留下面记录的两处报错修复。
+
+因此无需另行提供脱敏配置。软件配置与功能行为的复现核对已经完成；新实例仍需实际部署及联网验收。不复制整机磁盘，也不锁定所有 Ubuntu/apt/snap 包版本。
 
 本次操作仅修改这个 Git 仓库，未把任何改动安装到当前生产服务。
 
